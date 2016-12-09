@@ -63,8 +63,8 @@ func (s *Session) GetSendChannelSize() int {
 
 func (s *Session) Start() {
 	if atomic.CompareAndSwapInt32(&s.closed, -1, 0) {
-		go s.receive()
-		go s.send()
+		go s.receiveLoop()
+		go s.sendLoop()
 	}
 }
 
@@ -79,7 +79,7 @@ func (s *Session) AyncSend(packet interface{}) error {
 	return nil
 }
 
-func (s *Session) receive() {
+func (s *Session) receiveLoop() {
 	defer s.Close()
 	var buff []byte
 	var packet interface{}
@@ -93,7 +93,7 @@ func (s *Session) receive() {
 	}
 }
 
-func (s *Session) send() {
+func (s *Session) sendLoop() {
 	defer s.Close()
 	var buff []byte
 	var err error
