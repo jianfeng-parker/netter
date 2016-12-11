@@ -8,11 +8,8 @@ import (
 )
 
 var baseSessionId uint64
-
-var (
-	ClosedErr   = errors.New("session closed")
-	BlockingErr = errors.New("send channel blocking")
-)
+var ClosedErr = errors.New("session closed")
+var BlockingErr = errors.New("send channel blocking")
 
 type Session struct {
 	id       uint64
