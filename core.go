@@ -5,7 +5,6 @@ package netter
  */
 
 import (
-	"io"
 	"net"
 )
 
