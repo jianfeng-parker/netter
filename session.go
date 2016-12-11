@@ -9,7 +9,7 @@ import (
 
 var baseSessionId uint64
 
-const (
+var (
 	ClosedErr   = errors.New("session closed")
 	BlockingErr = errors.New("send channel blocking")
 )
@@ -30,7 +30,7 @@ type Session struct {
 
 func NewSession(conn net.Conn, protocol Protocol, sendChannelSize int) *Session {
 	session := &Session{
-		id:           atomic.AddUint64(baseSessionId, 1),
+		id:           atomic.AddUint64(&baseSessionId, 1),
 		conn:         conn,
 		protocol:     protocol,
 		closeChannel: make(chan int),
@@ -105,13 +105,6 @@ func (s *Session) IsClosed() bool {
 
 func (s *Session) Protocol() Protocol {
 	return s.protocol
-}
-
-func (s *Session) Start() {
-	if atomic.CompareAndSwapInt32(&s.closed, -1, 0) {
-		go s.receiveLoop()
-		go s.sendLoop()
-	}
 }
 
 // func (s *Session) ReceiveLoop() {
