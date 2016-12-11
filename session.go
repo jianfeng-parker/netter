@@ -3,62 +3,108 @@ package netter
 import (
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 )
 
+var baseSessionId uint64
+
 const (
-	ErrStoped             = errors.New("netter:session stoped")
-	ErrSendChannelBlocing = errors.New("netter: send channel blocking")
+	ClosedErr   = errors.New("session closed")
+	BlockingErr = errors.New("send channel blocking")
 )
 
 type Session struct {
-	closed        int32
-	conn          net.Conn
-	sendChannel   chan interface{}
-	stopedChannel chan struct{}
-	closeCallback func(*Session)
-	sendCallback  func(*Session, interface{})
-	handler       Handler
-	protocol      Protocol
+	id       uint64
+	conn     net.Conn
+	protocol Protocol
+	closed   int32 // 1->closed
+
+	sendChannel  chan interface{}
+	sendMutex    sync.RWMutex
+	receiveMutex sync.Mutex
+
+	closeChannel chan int
+	closeMutext  sync.Mutex
 }
 
-func (s *Session) RawConn() net.Conn {
-	return s.conn
+func NewSession(conn net.Conn, protocol Protocol, sendChannelSize int) *Session {
+	session := &Session{
+		id:           atomic.AddUint64(baseSessionId, 1),
+		conn:         conn,
+		protocol:     protocol,
+		closeChannel: make(chan int),
+	}
+	if sendChannelSize > 1 {
+		session.sendChannel = make(chan interface{}, sendChannelSize)
+	}
+	return session
 }
 
 func (s *Session) Close() error {
 	if atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
-		s.conn.Close()
-		close(s.stopedChannel)
-		if s.closeCallback != nil {
-			s.closeCallback(s)
+		close(s.closeChannel)
+		if s.sendChannel != nil {
+			s.sendMutex.Lock()
+			close(s.sendChannel)
+			s.sendMutex.Unlock()
 		}
+		err := s.conn.Close()
+		// TODO 此处可以执行关闭session时的回调
+		return err
 	}
-	return nil
+	return ClosedErr
 }
 
-func (s *Session) SetCloseCallback(callback func(*Session)) {
-	s.closeCallback = callback
+func (s *Session) Receive() (interface{}, error) {
+	s.receiveMutex.Lock()
+	defer s.receiveMutex.Unlock()
+	msg, err := s.protocol.Read(s.conn)
+	if err != nil {
+		s.Close()
+	}
+	return msg, err
 }
 
-func (s *Session) SetSendCallback(callback func(*Session)) {
-	s.sendCallback = callback
+func (s *Session) Send(msg interface{}) error {
+	if s.sendChannel == nil {
+		if s.IsClosed() {
+			return ClosedErr
+		}
+		s.sendMutex.Lock()
+		defer s.sendMutex.Unlock()
+		err := s.protocol.Write(s.conn, msg)
+		if err != nil {
+			s.Close()
+		}
+		return err
+	}
+	s.sendMutex.RLock()
+	if s.IsClosed() {
+		return ClosedErr
+	}
+	select {
+	case s.sendChannel <- msg:
+		s.sendMutex.RUnlock()
+		return nil
+	default:
+		s.sendMutex.RUnlock()
+		s.Close()
+		return BlockingErr
+	}
+
 }
 
-func (s *Session) SetHandler(handler Handler) {
-	s.handler = handler
+func (s *Session) ID() uint64 {
+	return s.id
 }
 
-func (s *Session) SetProtocol(protocol Protocol) {
-	s.protocol = protocol
+func (s *Session) IsClosed() bool {
+	return atomic.LoadInt32(&s.closed) == 1
 }
 
-func (s *Session) SetSendChannel(size int) {
-	s.sendChannel = make(chan interface{}, size)
-}
-
-func (s *Session) GetSendChannelSize() int {
-	return cap(s.sendChannel)
+func (s *Session) Protocol() Protocol {
+	return s.protocol
 }
 
 func (s *Session) Start() {
@@ -68,94 +114,30 @@ func (s *Session) Start() {
 	}
 }
 
-func (s *Session) AyncSend(packet interface{}) error {
-	select {
-	case s.sendChannel <- packet:
-	case <-s.stopedChannel:
-		return ErrStoped
-	default:
-		return ErrSendChannelBlocing
-	}
-	return nil
-}
+// func (s *Session) ReceiveLoop() {
+// 	defer s.Close()
+// 	var buff []byte
+// 	var msg interface{}
+// 	var err error
+// 	for {
+// 		msg, err = s.protocol.Read(s.con)
+// 		if err != nil {
+// 			break
+// 		}
+// 		s.handler(s, packet)
+// 	}
+// }
 
-func (s *Session) receiveLoop() {
+func (s *Session) SendLoop() {
 	defer s.Close()
-	var buff []byte
-	var packet interface{}
-	var err error
-	for {
-		packet, buff, err = s.protocol.Read(s.con, buff)
-		if err != nil {
-			break
-		}
-		s.handler(s, packet)
-	}
-}
-
-func (s *Session) sendLoop() {
-	defer s.Close()
-	var buff []byte
-	var err error
 	for {
 		select {
-		case packet, ok := <-s.sendChannel:
-			{
-				if !ok {
-					return
-				}
-				if buff, err := s.protocol.BuildPacket(packet, buff); err == nil {
-					err = s.protocol.Write(s.conn, buff)
-				}
-				if err != nil {
-					return
-				}
-				if s.sendCallback != nil {
-					s.sendCallback(s, packet)
-				}
-			}
-		case <-s.stopedChannel:
-			{
+		case msg, ok := <-s.sendChannel:
+			if !ok || s.protocol.Write(s.conn, msg) != nil {
 				return
 			}
+		case <-s.closeChannel:
+			return
 		}
 	}
-}
-
-func BuildSession(conn net.Conn, protocol Protocol, handler Handler, sendChannelSize int) *Session {
-	return &Session{
-		closed:        -1,
-		conn:          conn,
-		sendChannel:   make(chan interface{}, sendChannelSize),
-		stopedChannel: make(chan struct{}),
-		handler:       handler,
-		protocol:      protocol,
-	}
-}
-
-func Dial(network, address string, handler Handler, protocol Protocol, sendChannelSize int) (*Session, error) {
-	conn, err := net.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	return BuildSession(conn, protocol, handler, sendChannelSize), nil
-}
-
-type Handler func(s *Session, packet interface{})
-
-// 声明 reader接口，具体由用户自己实现
-type Reader interface {
-	// 从Conn中读取数据，并创建一个完整的Packet
-	Read(conn net.Conn, buff []byte) (interface{}, []byte, error)
-}
-
-type Writer interface {
-	BuildPacket(packet interface{}, buff []byte) ([]byte, error)
-
-	Write(conn net.Conn, buff []byte) error
-}
-
-type Protocol interface {
-	Reader
-	Writer
 }

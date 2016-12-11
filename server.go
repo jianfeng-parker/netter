@@ -1,13 +1,16 @@
 package netter
 
 import (
+	"io"
 	"net"
+	"strings"
+	"time"
 )
 
 type Server struct {
 	listener net.Listener
 
-	channelSize int
+	sendChannelSize int
 
 	handler Handler
 
@@ -15,39 +18,57 @@ type Server struct {
 }
 
 // build new server instance
-func BuildServer(listener net.Listener, protocol Protocol, handler Handler, channelSize int) *Server {
+func NewServer(listener net.Listener, protocol Protocol, handler Handler, sendChannelSize int) *Server {
 	return &Server{
-		listener: listener,
-		protocol: protocol,
-		handler:  handler,
-		protocol: protocol,
+		listener:        listener,
+		protocol:        protocol,
+		handler:         handler,
+		sendChannelSize: sendChannelSize,
 	}
 }
 
-func Listen(network, address string, protocol Protocol, handler Handler, channelSize int) (*Server, error) {
-	listener, err := net.Listen(network, address)
-	if err != nil {
-		return nil, err
-	}
-	return BuildServer(listener, protocol, handler, channelSize), nil
-}
-
-func (s *Server) Close() error {
+func (s *Server) Stop() error {
 	return s.listener.Close()
 }
 
-func (s *Server) Accept(callback func(*Session)) error {
-	defer s.Close()
+func (s *Server) Start() error {
+	for {
+		conn, err := s.accept()
+		if err != nil {
+			return err
+		}
+		go func() {
+			// 每Accept一个连接后就生成对应的Session对象
+			session := NewSession(conn, s.protocol, s.sendChannelSize)
+			// 异步处理Session
+			s.handler.Handle(session)
+		}()
+	}
+}
+
+// 轮询监听获取新的连接
+func (s *Server) accept() (net.Conn, error) {
+	var tempDelay time.Duration
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				time.Sleep(tempDelay)
 				continue
-			} else {
-				return err
 			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return nil, io.EOF
+			}
+			return nil, err
 		}
-		session := BuildSession(conn, s.protocol, s.handler, s.channelSize)
-		callback(session)
+		return conn, nil
 	}
 }
