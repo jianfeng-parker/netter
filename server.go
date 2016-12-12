@@ -40,8 +40,10 @@ func (s *Server) Start() error {
 		go func() {
 			// 每Accept一个连接后就生成对应的Session对象
 			session := NewSession(conn, s.protocol, s.sendChannelSize)
-			// 异步处理Session
-			s.handler.Handle(session)
+			// TODO 将session管控起来
+			// ...
+			// TODO 使用handler处理连接
+			s.handler.Handle()
 		}()
 	}
 }

@@ -43,11 +43,11 @@ type Writer interface {
 }
 
 type Handler interface {
-	Handle(*Session)
+	Handle()
 }
 
-type DefaultHandler func(*Session)
+type HandlerFunc func()
 
-func (h DefaultHandler) Handle(s *Session) {
-	h.Handle(s)
+func (h HandlerFunc) Handle() {
+	h.Handle()
 }
